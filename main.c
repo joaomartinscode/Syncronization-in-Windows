@@ -2,92 +2,53 @@
 #include <stdio.h>
 #include <windows.h>
 
-#define NPROD 10
-#define NCONS 5
+#define MAX_LINE 256
+int numWorkers = 0;
+int minWorkTime = 0;
+int maxWorkTime = 0;
 
-int capacity = 5;
-int items = 0;
-HANDLE mutex;
+typedef struct Order {
+	int id;
+	char customerName[50];
+	int quantidade;
+	float precoTotal;
+	struct Order* next;
+} Order;
+
+void read_data(FILE* file) {
 
 
-// Função para importar data para os arrays + inicialização
-void read_data() {
+	char line[256];
 
-	system("cls");
-	printf(" ***  Spotify da Wish  ***\n\n");
+	fgets(line, sizeof(line), file
 
-	//Inicializar todas as matrizes com 0, \0
-	initialization();
 
-	// Preencher matriz de utilizadores
-	FILE* file_users = fopen("utilizadores.txt", "r");
-	if (file_users == NULL) { printf(" Erro: Abrir ficheiro utilizador    - LEITURA\n"); }
-	else {
-		printf(" Sucesso: Abrir ficheiro utilizador - LEITURA\n");
-		i = 0;
-		while (fgets(line, sizeof(line), file_users)) {
-			line[strcspn(line, "\n")] = '\0';
-			switch (i % 4) {
-			case 0: { sscanf(line, "%4d", &users[i / 4].id); break; }
-			case 1: { strcpy(users[i / 4].name, line); break; }
-			case 2: { strcpy(users[i / 4].email, line); break; }
-			case 3: { strcpy(users[i / 4].password, line); break; }
-			} i++;
-		} fclose(file_users);
-	}
+		line[strcspn(line, "\n")] = '\0'; // remove newline
 
-	// Preencher matriz de conteudos
-	FILE* file_contents = fopen("conteudos.txt", "r");
-	if (file_contents == NULL) { printf(" Erro: Abrir ficheiro conteudo      - LEITURA\n"); }
-	else {
-		printf(" Sucesso: Abrir ficheiro conteudo   - LEITURA\n");
-		i = 0;
-		while (fgets(line, sizeof(line), file_contents)) {
-			line[strcspn(line, "\n")] = '\0';
-			switch (i % 5) {
-			case 0: { sscanf(line, "%4d %4d %4d %4d", &contents[i / 5].id, &contents[i / 5].day, &contents[i / 5].month, &contents[i / 5].year);    break; }
-			case 1: { strcpy(contents[i / 5].title, line); break; }
-			case 2: { strcpy(contents[i / 5].type, line); break; }
-			case 3: { strcpy(contents[i / 5].author, line); break; }
-			case 4: { strcpy(contents[i / 5].genre, line); break; }
-			} i++;
-		} fclose(file_contents);
-	}
+		char* token = strtok(line, ";");
+		if (!token) continue;
+		users[user_count].id = atoi(token);
 
-	// Preencher matriz de playlists
-	FILE* file_playlists = fopen("playlists.txt", "r");
-	if (file_playlists == NULL) { printf(" Erro: Abrir ficheiro playlist      - LEITURA\n"); }
-	else {
-		printf(" Sucesso: Abrir ficheiro playlist   - LEITURA\n");
-		i = 0;
-		while (fgets(line, sizeof(line), file_playlists)) {
-			line[strcspn(line, "\n")] = '\0';
-			switch (i % 4) {
-			case 0: { sscanf(line, "%4d %4d", &playlists[i / 4].id, &playlists[i / 4].id_owner); break; }
-			case 1: { strcpy(playlists[i / 4].name, line); break; }
-			case 2: { strcpy(playlists[i / 4].type, line); break; }
-			case 3: {
-				char* ptr = line; // Apontador que aponta o array line
-				for (j = 0; j < LIM; j++) {
-					sscanf(ptr, "%4d", &playlists[i / 4].content_id[j]);
-					ptr += 4; // mover o apontador 4 "chars" para a frente
-				} break;
-			}
-			} i++;
-		} fclose(file_playlists);
-	}
+		token = strtok(NULL, ";");
+		if (!token) continue;
+		strncpy(users[user_count].name, token, sizeof(users[user_count].name));
 
-	printf(" Inicializacao completa!\n\n");
-	printf(" ********** ~o~ **********\n\n ");
-	sleep(WAIT);
-	system("cls");
+		token = strtok(NULL, ";");
+		if (!token) continue;
+		users[user_count].value1 = atoi(token);
+
+		token = strtok(NULL, ";");
+		if (!token) continue;
+		users[user_count].value2 = atof(token);
+
+		user_count++;
+		if (user_count >= MAX) break;
+
+	printf("Loaded %d users from %s\n", user_count, filename);
 }
-/* -------------------------------------------- Guardar Informações ---------------------------------------------------*/
 
 void save_data() {
 
-	system("cls");
-	printf(" ***  Spotify da Wish  ***\n\n");
 
 	// Guardar dados no txt "utilizadores"
 	FILE* file_users = fopen("utilizadores.txt", "w");
@@ -132,7 +93,7 @@ void save_data() {
 	printf("\n ********** ~o~ **********\n\n ");
 }
 
-DWORD WINAPI producer(LPVOID T)
+DWORD WINAPI worker(LPVOID T)
 {
 	int* threadID;
 	threadID = (int*)T;
@@ -154,7 +115,7 @@ DWORD WINAPI producer(LPVOID T)
 	return 0;
 }
 
-DWORD WINAPI consumer(LPVOID T)
+DWORD WINAPI monitor(LPVOID T)
 
 {
 	int* threadID;
@@ -176,41 +137,65 @@ DWORD WINAPI consumer(LPVOID T)
 	return 0;
 }
 
+void mainErrorHandeling(int argc, char* argv[]) {
+	if (argc <= 4) {
+		printf("Too few arguments\n");
+		exit(1);
+	}
+
+	if (atoi(argv[2]) == 0 && argv[2][0] != '0') {
+		printf("Invalid number of workers\n");
+		exit(1);
+	}
+	else {
+		numWorkers = atoi(argv[2]);
+	}
+	
+	if (atoi(argv[3]) == 0 && argv[3][0] != '0') {
+		printf("Invalid minimum worker duration\n");
+		exit(1);
+	}
+
+	if (atoi(argv[4]) == 0 && argv[4][0] != '0') {
+		printf("Invalid maximum worker duration\n");
+		exit(1);
+	}
+}
+
 int main(int argc, char* argv[])
 {
 
 	int i;
 
-	DWORD threadIDConsumer[NCONS], threadIDProducer[NPROD];
-	HANDLE threadHConsumer[NCONS], threadHProducer[NPROD];
+	mainErrorHandeling(argc, argv);
+
+	DWORD threadIDWorker[NCONS], threadIDMonitor;
+	HANDLE threadHWorker[NCONS], threadHMonitor;
 
 	mutex = CreateMutexA(NULL, FALSE, NULL);
 	if (mutex == NULL) return 0;
 
-	for (i = 0; i < NPROD; i++) {
-		threadHProducer[i] = CreateThread(NULL, 0, producer, (LPVOID)i, 0, &threadIDProducer[i]);
-		if (threadHProducer[i] == NULL) return 0;
-	}
-	for (i = 0; i < NCONS; i++) {
-		threadHConsumer[i] = CreateThread(NULL, 0, consumer, (LPVOID)i, 0, &threadIDConsumer[i]);
-		if (threadHConsumer[i] == NULL) return 0;
-	}
-
-	for (i = 0; i < NCONS; i++) {
-		WaitForSingleObject(threadHConsumer[i], INFINITE);
-	}
+	threadHMonitor = CreateThread(NULL, 0, monitor, (LPVOID)i, 0, &threadIDMonitor);
+	if (threadHMonitor == NULL) return 0;
 
 	for (i = 0; i < NPROD; i++) {
-		WaitForSingleObject(threadHProducer[i], INFINITE);
+		threadHWorker[i] = CreateThread(NULL, 0, worker, (LPVOID)i, 0, &threadIDWorker[i]);
+		if (threadHWorker[i] == NULL) return 0;
 	}
 
 	for (i = 0; i < NCONS; i++) {
-		CloseHandle(threadHConsumer[i]);
+		WaitForSingleObject(threadHWorker[i], INFINITE);
 	}
 
 	for (i = 0; i < NPROD; i++) {
-		CloseHandle(threadHProducer[i]);
+		WaitForSingleObject(threadHMonitor, INFINITE);
 	}
+
+	for (i = 0; i < NCONS; i++) {
+		CloseHandle(threadHWorker[i]);
+	}
+
+	CloseHandle(threadHMonitor[i]);
 
 	return 0;
 }
