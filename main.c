@@ -3,13 +3,17 @@
 #include <windows.h>
 #include <time.h>
 #include <string.h>
+#include <signal.h>
 
 #define MAX_LINE 256
 
 HANDLE mutexList, mutexOutput, mutexVariables;
 HANDLE semaphoreSlots, semaphoreItems;
+HANDLE* threadHWorker = NULL;
+HANDLE threadHMonitor = NULL;
 
 FILE* logFile = NULL;
+FILE* file = NULL;
 
 typedef struct Order {
 	int id;
@@ -28,8 +32,10 @@ int countProcessed = 0;
 
 int minWorkTime = 0;
 int maxWorkTime = 0;
+int nWorkers = 0;
 
 int finished = 0;
+int closing = 0;
 
 void pushOrder(Order* newOrder) {
 	newOrder->next = NULL;
@@ -81,8 +87,21 @@ DWORD WINAPI worker(LPVOID params)
 	int myID = *(int*)params;
 	free(params);
 
+	srand((unsigned int)time(NULL) ^ (myID + 1));
+
+	WaitForSingleObject(mutexOutput, INFINITE);
+	printf("[Worker %d] Iniciado e a aguardar tarefas...\n", myID);
+	ReleaseMutex(mutexOutput);
+
 	while (1) {
 		Order* myOrder = popOrder();
+
+		if (closing) {
+			if (myOrder != NULL) {
+				free(myOrder);
+			}
+			break;
+		}
 
 		if (myOrder == NULL) {
 			if (finished) {
@@ -91,20 +110,38 @@ DWORD WINAPI worker(LPVOID params)
 			continue;
 		}
 
+		WaitForSingleObject(mutexOutput, INFINITE);
+		printf("[Worker %d] RECEBEU encomenda %d (Cliente: %s). A preparar...\n",
+			myID, myOrder->id, myOrder->customerName);
+		ReleaseMutex(mutexOutput);
+
 		WaitForSingleObject(mutexVariables, INFINITE);
 		countProcessing++;
 		int waitTime = minWorkTime + (rand() % (maxWorkTime - minWorkTime + 1));
 		ReleaseMutex(mutexVariables);
 
+		WaitForSingleObject(mutexOutput, INFINITE);
+		printf("[Worker %d] A PROCESSAR encomenda %d... (Tempo estimado: %dms)\n",
+			myID, myOrder->id, waitTime);
+		ReleaseMutex(mutexOutput);
+
 		Sleep(waitTime);
 
 		WaitForSingleObject(mutexOutput, INFINITE);
+		printf("[Worker %d] CONCLUIU encomenda %d (Cliente: %s)\n",
+			myID, myOrder->id, myOrder->customerName);
+
 		if (logFile) {
-			printf("Worker %d processou a encomenda %d (Cliente: %s)\n",
-				myID, myOrder->id, myOrder->customerName);
-			fprintf(logFile, "Worker %d processou a encomenda %d (Cliente: %s)\n",
-				myID, myOrder->id, myOrder->customerName);
-			fflush(logFile);
+			if (!closing) {
+				fprintf(logFile, "Worker %d processou a encomenda %d (Cliente: %s)\n",
+					myID, myOrder->id, myOrder->customerName);
+				fflush(logFile);
+			}
+			else {
+				fprintf(logFile, "Worker %d [ENCERRAMENTO FORCADO] concluiu a encomenda %d (Cliente: %s)\n",
+					myID, myOrder->id, myOrder->customerName);
+				fflush(logFile);
+			}
 		}
 		ReleaseMutex(mutexOutput);
 
@@ -115,6 +152,11 @@ DWORD WINAPI worker(LPVOID params)
 
 		free(myOrder);
 	}
+
+	WaitForSingleObject(mutexOutput, INFINITE);
+	printf("[Worker %d] A encerrar.\n", myID);
+	ReleaseMutex(mutexOutput);
+
 	return 0;
 }
 
@@ -149,6 +191,74 @@ DWORD WINAPI monitor(LPVOID params)
 		Sleep(1000);
 	}
 	return 0;
+}
+
+void CloseHandling(int signal_number)
+{
+	printf("\n[SIGNAL] Encerramento iniciado (SIGINT)\n");
+
+	WaitForSingleObject(mutexOutput, INFINITE);
+
+	if (logFile) {
+		fprintf(logFile, "ATENCAO: FOI GERADA UMA INTERRUPCAO!!!\n");
+		fflush(logFile);
+	}
+	ReleaseMutex(mutexOutput);
+
+	closing = 1;
+	finished = 1;
+
+	WaitForSingleObject(mutexList, INFINITE);
+
+	Order* curr = head;
+	while (curr) {
+		Order* tmp = curr;
+		curr = curr->next;
+		free(tmp);
+	}
+	head = NULL;
+	tail = NULL;
+	countPending = 0;
+
+	ReleaseMutex(mutexList);
+	printf("[SIGNAL] Lista de pendentes limpa.\n");
+
+	for (int i = 0; i < nWorkers; i++) {
+		ReleaseSemaphore(semaphoreItems, 1, NULL);
+	}
+
+	if (threadHWorker != NULL) {
+		for (int i = 0; i < nWorkers; i++) {
+			if (threadHWorker[i] != NULL) {
+				WaitForSingleObject(threadHWorker[i], INFINITE);
+				CloseHandle(threadHWorker[i]);
+			}
+		}
+	}
+
+	if (threadHMonitor != NULL) {
+		WaitForSingleObject(threadHMonitor, INFINITE);
+		CloseHandle(threadHMonitor);
+	}
+
+	if (file != NULL) {
+		fclose(file);
+		file = NULL;
+	}
+
+	if (logFile != NULL) {
+		fclose(logFile);
+		logFile = NULL;
+	}
+
+	if (mutexList) CloseHandle(mutexList);
+	if (mutexOutput) CloseHandle(mutexOutput);
+	if (mutexVariables) CloseHandle(mutexVariables);
+	if (semaphoreSlots) CloseHandle(semaphoreSlots);
+	if (semaphoreItems) CloseHandle(semaphoreItems);
+
+	printf("[CLOSE] Recursos libertados com sucesso.\n");
+	exit(0);
 }
 
 void mainErrorHandeling(int argc, char* argv[]) {
@@ -197,10 +307,8 @@ int main(int argc, char* argv[])
 	mainErrorHandeling(argc, argv);
 
 	char* filePath = argv[1];
-	int nWorkers = atoi(argv[2]);
+	nWorkers = atoi(argv[2]);
 	int maxOrders = atoi(argv[3]);
-
-	srand(time(NULL));
 
 	logFile = fopen("output.log", "w");
 	if (!logFile) {
@@ -208,7 +316,7 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	FILE* file = fopen(filePath, "r");
+	file = fopen(filePath, "r");
 	if (!file) {
 		printf("Erro a abrir ficheiro: %s\n", filePath);
 		return 1;
@@ -216,8 +324,7 @@ int main(int argc, char* argv[])
 
 	DWORD* threadIDWorker = (DWORD*)malloc(sizeof(DWORD) * nWorkers);
 	DWORD threadIDMonitor;
-	HANDLE* threadHWorker = (HANDLE*)malloc(sizeof(HANDLE) * nWorkers);
-	HANDLE threadHMonitor;
+	threadHWorker = (HANDLE*)malloc(sizeof(HANDLE) * nWorkers);
 
 	mutexList = CreateMutex(NULL, FALSE, NULL);
 	if (mutexList == NULL) {
@@ -258,12 +365,10 @@ int main(int argc, char* argv[])
 		*pID = i;
 
 		threadHWorker[i] = CreateThread(NULL, 0, worker, (LPVOID)pID, 0, &threadIDWorker[i]);
-		if (threadHWorker[i] == NULL) return 0;
-
 		if (threadHWorker[i] == NULL) {
 			printf("Erro ao criar thread worker %d\n", i);
 			free(pID); 
-			return 1;
+			exit(1);
 		}
 	}
 
@@ -274,6 +379,8 @@ int main(int argc, char* argv[])
 
 	while (fscanf(file, "%d;%49[^;];%d;%f", &idTemp, nameTemp, &qtdTemp, &priceTemp) == 4)
 	{
+		signal(SIGINT, CloseHandling);
+
 		Order* newOrder = (Order*)malloc(sizeof(Order));
 		if (newOrder == NULL) {
 			printf("Erro de memoria\n");
